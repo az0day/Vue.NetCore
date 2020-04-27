@@ -27,9 +27,6 @@ namespace VOL.System.Services
             WebResponseContent responseContent = new WebResponseContent();
             try
             {
-                responseContent = loginInfo.ValidationEntity(x => new { x.UserName, x.PassWord });
-                if (!responseContent.Status) return responseContent;
-
                 Sys_User user = await repository.FindAsIQueryable(x => x.UserName == loginInfo.UserName)
                     .FirstOrDefaultAsync();
 
@@ -201,17 +198,31 @@ namespace VOL.System.Services
         /// <returns></returns>
         public override PageGridData<Sys_User> GetPageData(PageDataOptions pageData)
         {
-
+            int roleId = -1;
+            //树形菜单传查询角色下所有用户
+            if (pageData.Value != null)
+            {
+                roleId = pageData.Value.ToString().GetInt();
+            }
             QueryRelativeExpression = (IQueryable<Sys_User> queryable) =>
             {
-                if (UserContext.Current.IsSuperAdmin) return queryable;
+                if (roleId <= 0)
+                {
+                    if (UserContext.Current.IsSuperAdmin) return queryable;
+                    roleId = UserContext.Current.RoleId;
+                }
 
                 //查看用户时，只能看下自己角色下的所有用户
                 List<int> roleIds = Sys_RoleService
                    .Instance
-                   .GetAllChildrenRoleId(UserContext.Current.RoleId).Result;
-                //roleIds.Contains(x.Role_Id) || x.User_Id == UserContext.Current.UserId此处查询存在性能问题，根据实际情况自行解决
-                return queryable.Where(x => roleIds.Contains(x.Role_Id) || x.User_Id == UserContext.Current.UserId);
+                   .GetAllChildrenRoleId(roleId).Result;
+                roleIds.Add(roleId);
+                //判断查询的角色是否越权
+                if (roleId != UserContext.Current.RoleId && !roleIds.Contains(roleId))
+                {
+                    roleId = -999;
+                }
+                return queryable.Where(x => roleIds.Contains(x.Role_Id));
             };
             base.OrderByExpression = x => new Dictionary<object, Core.Enums.QueryOrderBy>() {
                 { x.CreateDate, Core.Enums.QueryOrderBy.Desc },
@@ -234,7 +245,8 @@ namespace VOL.System.Services
                 if (roleId > 0)
                 {
                     string roleName = GetChildrenName(roleId);
-                    if (string.IsNullOrEmpty(roleName)) return responseData.Error("不能选择此角色");
+                    if ((!UserContext.Current.IsSuperAdmin && roleId == 1) || string.IsNullOrEmpty(roleName))
+                        return responseData.Error("不能选择此角色");
                     //选择新建的角色ID，手动添加角色ID的名称
                     userModel.MainData["RoleName"] = roleName;
                 }
@@ -252,7 +264,6 @@ namespace VOL.System.Services
                     return responseData.Error("用户名已经被注册");
                 user.UserPwd = pwd.EncryptDES(AppSetting.Secret.User);
                 //设置默认头像
-                user.HeadImageUrl = "https://imgs-1256993465.cos.ap-chengdu.myqcloud.com/h5pic/x1.jpg";
                 return responseData.OK();
             };
 
@@ -274,13 +285,14 @@ namespace VOL.System.Services
         {
             base.DelOnExecuting = (object[] ids) =>
             {
+                int[] userIds = ids.Select(x => Convert.ToInt32(x)).ToArray();
                 //校验只能删除当前角色下能看到的用户
-                var delUserIds = repository.Find(x => ids.Contains(x.User_Id), s => new { s.User_Id, s.Role_Id, s.UserTrueName });
+                var xxx = repository.Find(x => userIds.Contains(x.User_Id));
+                var delUserIds = repository.Find(x => userIds.Contains(x.User_Id), s => new { s.User_Id, s.Role_Id, s.UserTrueName });
                 List<int> roleIds = Sys_RoleService
                    .Instance
                    .GetAllChildrenRoleId(UserContext.Current.RoleId)
                    .Result;
-
 
                 string[] userNames = delUserIds.Where(x => !roleIds.Contains(x.Role_Id))
                  .Select(s => s.UserTrueName)
@@ -324,14 +336,15 @@ namespace VOL.System.Services
             //禁止修改用户名
             base.UpdateOnExecute = (SaveModel saveInfo) =>
             {
-                if (saveInfo.MainData.ContainsKey("RoleName"))
-                    saveInfo.MainData.Remove("RoleName");
                 int roleId = saveModel.MainData["Role_Id"].GetInt();
-
-                string roleName = GetChildrenName(roleId);
-
+                string roleName = userInfo.Role_Id == roleId ? userInfo.RoleName : GetChildrenName(roleId);
+                saveInfo.MainData.TryAdd("RoleName", roleName);
+                if (UserContext.IsRoleIdSuperAdmin(userInfo.Role_Id))
+                {
+                    return responseContent.OK();
+                }
                 if (string.IsNullOrEmpty(roleName)) return responseContent.Error("不能选择此角色");
-                saveInfo.MainData.Add("RoleName", roleName);
+
                 return responseContent.OK();
             };
             base.UpdateOnExecuting = (Sys_User user, object obj1, object obj2, List<object> list) =>
